@@ -2,8 +2,10 @@ import easyocr
 import imageio.v3 as iio
 import os, sys
 
-print("EasyOCR yukleniyor (ilk seferde model indirecek)...")
-reader = easyocr.Reader(['en'], gpu=False)
+import torch
+USE_GPU = torch.cuda.is_available()
+print(f"EasyOCR yukleniyor (GPU: {USE_GPU})...")
+reader = easyocr.Reader(['en'], gpu=USE_GPU)
 
 video_file = "Stake.com Animated Bonus Drop Template (30).mp4"
 
