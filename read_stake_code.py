@@ -13,12 +13,20 @@ if not os.path.exists(video_file):
 
 print("Video okunuyor...")
 frames = iio.imread(video_file, plugin="pyav")
-print(f"Toplam {len(frames)} frame bulundu")
+total = len(frames)
+print(f"Toplam {total} frame bulundu")
+
+# Videonun sadece son yarisini tara (kod orada gorunuyor)
+# Baslangic: frame 200'den itibaren (ilk yaridaki BONUS DROP animasyonunu atla)
+START_FRAME = 200
+STEP = 3
 
 all_texts = {}
 
-print("OCR taramasi basliyor (CPU, biraz zaman alacak)...")
-for i in range(0, len(frames), 2):
+print(f"OCR taramasi basliyor (frame {START_FRAME}-{total}, adim {STEP})...")
+print(f"Taranacak frame sayisi: {(total - START_FRAME) // STEP}")
+
+for i in range(START_FRAME, total, STEP):
     results = reader.readtext(frames[i])
     for (bbox, text, confidence) in results:
         text_clean = text.strip()
@@ -26,8 +34,8 @@ for i in range(0, len(frames), 2):
             if text_clean not in all_texts or all_texts[text_clean][1] < confidence:
                 all_texts[text_clean] = (i, confidence)
 
-    if (i % 20) == 0:
-        print(f"  Ilerleme: {i}/{len(frames)} frame...")
+    if (i % 15) == 0:
+        print(f"  Ilerleme: frame {i}/{total}...")
 
 print("\n" + "=" * 60)
 print("TUM BULUNAN METINLER (guven > 0.25):")
@@ -39,5 +47,5 @@ print("\n" + "=" * 60)
 print("STAKE ICEREN METINLER:")
 print("=" * 60)
 for text, (frame_num, conf) in sorted(all_texts.items(), key=lambda x: -x[1][1]):
-    if 'stake' in text.lower() or 'stak' in text.lower():
+    if 'stake' in text.lower() or 'stak' in text.lower() or 'com' in text.lower():
         print(f"  Frame {frame_num:3d} [{conf:.2f}]: {text}")
