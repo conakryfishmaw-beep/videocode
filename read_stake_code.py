@@ -1,17 +1,15 @@
 import imageio.v3 as iio
+import cv2
+import numpy as np
+from PIL import Image
 import os, sys
-import subprocess
 
-# Tesseract kullan (EasyOCR'dan 5-10x daha hizli CPU'da)
 try:
     import pytesseract
-    from PIL import Image
-    import numpy as np
-    USE_TESSERACT = True
+    HAS_TESSERACT = True
 except ImportError:
-    USE_TESSERACT = False
+    HAS_TESSERACT = False
 
-# EasyOCR fallback
 try:
     import easyocr
     HAS_EASYOCR = True
@@ -29,77 +27,149 @@ frames = iio.imread(video_file, plugin="pyav")
 total = len(frames)
 print(f"Toplam {total} frame bulundu")
 
-# Sadece son kismi tara (kod orada gorunuyor)
+
+def unwarp_arc_text(img):
+    """Yarim ay/kavisli metni duzlestir (polar transform)"""
+    h, w = img.shape[:2]
+    
+    # Merkez nokta (yarim ayin merkezi)
+    cx, cy = w // 2, h // 2
+    
+    # Polar koordinatlara cevir (kavisli yaziyi duzlestirir)
+    max_radius = min(cx, cy)
+    
+    # Farkli yaricap ve aci araliklari dene
+    results = []
+    
+    # Yontem 1: Tam polar transform
+    polar = cv2.linearPolar(img, (cx, cy), max_radius, cv2.WARP_FILL_OUTLIERS)
+    results.append(polar)
+    
+    # Yontem 2: Log-polar
+    log_polar = cv2.logPolar(img, (cx, cy), max_radius / np.log(max_radius), cv2.WARP_FILL_OUTLIERS)
+    results.append(log_polar)
+    
+    # Yontem 3: Ust yarim daireyi duzlestir
+    # Sadece ust yarisi al ve warp
+    top_half = img[0:cy, :]
+    results.append(top_half)
+    
+    # Yontem 4: Alt yarim daireyi duzlestir
+    bottom_half = img[cy:, :]
+    results.append(bottom_half)
+    
+    return results
+
+
+def preprocess_frame(frame):
+    """Frame'i OCR icin hazirla"""
+    gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    
+    variants = []
+    
+    # Orijinal gri
+    variants.append(gray)
+    
+    # Kontrast artir (CLAHE)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    variants.append(enhanced)
+    
+    # Binary threshold
+    _, binary = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY)
+    variants.append(binary)
+    
+    # Inverse binary
+    _, binary_inv = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)
+    variants.append(binary_inv)
+    
+    # Adaptive threshold
+    adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+    variants.append(adaptive)
+    
+    return variants
+
+
+def ocr_image(img):
+    """Bir goruntuden metin oku"""
+    texts = set()
+    
+    if HAS_TESSERACT:
+        # Farkli PSM modlari dene
+        for psm in [6, 7, 11, 12]:
+            try:
+                config = f'--psm {psm} --oem 3'
+                text = pytesseract.image_to_string(Image.fromarray(img), config=config)
+                for line in text.split('\n'):
+                    line = line.strip()
+                    if len(line) > 5:
+                        texts.add(line)
+            except:
+                pass
+    
+    return texts
+
+
+# Ana tarama
 START_FRAME = 200
 STEP = 5
-
 all_texts = {}
+
 scan_count = (total - START_FRAME) // STEP
-print(f"Taranacak frame sayisi: {scan_count} (frame {START_FRAME}-{total}, adim {STEP})")
+print(f"\nTaranacak frame sayisi: {scan_count}")
+print("Kavisli metin duzlestirme + OCR uygulanacak...\n")
 
-if USE_TESSERACT:
-    print("Tesseract OCR kullaniliyor (hizli)...")
+for i in range(START_FRAME, total, STEP):
+    frame = frames[i]
     
-    for i in range(START_FRAME, total, STEP):
-        img = Image.fromarray(frames[i])
-        
-        # Goruntu isleme: gri + kontrast artir
-        img_gray = img.convert('L')
-        img_np = np.array(img_gray)
-        
-        # Threshold uygula
-        _, thresh = __import__('cv2').threshold(img_np, 127, 255, __import__('cv2').THRESH_BINARY)
-        
-        # Ayrica ters threshold da dene
-        _, thresh_inv = __import__('cv2').threshold(img_np, 127, 255, __import__('cv2').THRESH_BINARY_INV)
-        
-        for img_variant in [img_np, thresh, thresh_inv]:
-            text = pytesseract.image_to_string(Image.fromarray(img_variant), config='--psm 6')
-            for line in text.split('\n'):
-                line = line.strip()
-                if len(line) > 3:
-                    if line not in all_texts:
-                        all_texts[line] = i
-        
-        if (i - START_FRAME) % 20 == 0:
-            print(f"  Ilerleme: frame {i}/{total}...")
-
-elif HAS_EASYOCR:
-    import torch
-    USE_GPU = torch.cuda.is_available()
-    print(f"EasyOCR kullaniliyor (GPU: {USE_GPU})...")
-    reader = easyocr.Reader(['en'], gpu=USE_GPU)
+    # 1. Normal OCR (tum frame)
+    for variant in preprocess_frame(frame):
+        texts = ocr_image(variant)
+        for t in texts:
+            if t not in all_texts:
+                all_texts[t] = i
     
-    for i in range(START_FRAME, total, STEP):
-        results = reader.readtext(frames[i])
-        for (bbox, text, confidence) in results:
-            text_clean = text.strip()
-            if confidence > 0.25 and len(text_clean) > 3:
-                if text_clean not in all_texts:
-                    all_texts[text_clean] = i
-        
-        if (i - START_FRAME) % 15 == 0:
-            print(f"  Ilerleme: frame {i}/{total}...")
-else:
-    print("HATA: Ne tesseract ne de easyocr yuklu!")
-    print("Kur: pip3 install pytesseract Pillow opencv-python-headless")
-    print("Ve: sudo apt install tesseract-ocr")
-    sys.exit(1)
+    # 2. Kavisli metin duzlestir ve OCR
+    for variant in preprocess_frame(frame):
+        unwarped_list = unwarp_arc_text(variant)
+        for unwarped in unwarped_list:
+            texts = ocr_image(unwarped)
+            for t in texts:
+                if t not in all_texts:
+                    all_texts[t] = i
+    
+    # 3. Sadece alt yarisi tara (kod genelde altta)
+    h = frame.shape[0]
+    bottom = frame[h//2:, :]
+    for variant in preprocess_frame(bottom):
+        texts = ocr_image(variant)
+        for t in texts:
+            if t not in all_texts:
+                all_texts[t] = i
+    
+    if (i - START_FRAME) % 10 == 0:
+        print(f"  Frame {i}/{total}... ({len(all_texts)} metin bulundu)")
 
+# Sonuclari filtrele
 print("\n" + "=" * 60)
-print("TUM BULUNAN METINLER:")
+print("STAKE / STAKECOM ICEREN METINLER:")
 print("=" * 60)
+found_stake = []
 for text, frame_num in sorted(all_texts.items()):
-    print(f"  Frame {frame_num:3d}: {text}")
-
-print("\n" + "=" * 60)
-print("STAKE / COM ICEREN METINLER:")
-print("=" * 60)
-found = False
-for text, frame_num in sorted(all_texts.items()):
-    if 'stake' in text.lower() or 'stak' in text.lower() or 'stakecom' in text.lower().replace('.', '').replace(' ', ''):
+    tl = text.lower().replace(' ', '').replace('.', '')
+    if 'stake' in tl or 'stak' in tl or 'stke' in tl:
+        found_stake.append((frame_num, text))
         print(f"  Frame {frame_num:3d}: {text}")
-        found = True
 
-if not found:
-    print("  Bulunamadi. Tum metinlere yukaridan bakin.")
+if not found_stake:
+    print("  Direkt 'stake' bulunamadi.")
+
+# Uzun metinleri goster (kod genelde uzun olur)
+print("\n" + "=" * 60)
+print("UZUN METINLER (>15 karakter, muhtemel kod):")
+print("=" * 60)
+for text, frame_num in sorted(all_texts.items(), key=lambda x: -len(x[0])):
+    if len(text) > 15:
+        print(f"  Frame {frame_num:3d} ({len(text):2d} chr): {text}")
+
+print(f"\nToplam {len(all_texts)} benzersiz metin bulundu.")
